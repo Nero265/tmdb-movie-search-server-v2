@@ -4,7 +4,7 @@ using DotNetEnv;
     
 class Program
 {
-    static void Main(string[] args)
+    static async Task Main(string[] args)
     {
         Env.Load();
 
