@@ -13,15 +13,16 @@ namespace TMDBMovieSearch.Server
     {
         private readonly HttpListener _listener;
         private readonly string _prefix;
-
-        //nakon tmdbservice
         private readonly TmdbService _tmdbService;
+        private readonly SemaphoreSlim _requestThrottle;
+        private const int MaxConcurrentRequest = 10;
 
         public WebServer(string prefix, string apiKey)
         {
             _prefix = prefix;
             _listener = new HttpListener();
             _listener.Prefixes.Add(prefix);
+            _requestThrottle = new SemaphoreSlim(MaxConcurrentRequest, MaxConcurrentRequest);
             _tmdbService = new TmdbService(
                 baseUrl: "https://api.themoviedb.org/3/search/movie",
                 apiKey: apiKey,
@@ -39,14 +40,15 @@ namespace TMDBMovieSearch.Server
             {
                 while (_listener.IsListening)
                 {
-                    HttpListenerContext context = _listener.GetContext();
-
-                    HttpListenerContext capturedContext = context; //captured-variable
-
-                    ThreadPool.QueueUserWorkItem(state =>
+                    try
                     {
-                        HandleRequest(capturedContext);
-                    });
+                        HttpListenerContext context = _listener.GetContext();
+                        _ = Task.Run(() => HandleRequest(context));
+                    }
+                    catch (HttpListenerException) when (!_listener.IsListening)
+                    {
+                        break;
+                    }
                 }
             });
 
@@ -65,7 +67,7 @@ namespace TMDBMovieSearch.Server
             Console.WriteLine("Server je zaustavljen.");
         }
 
-        private void HandleRequest(HttpListenerContext context)
+        private async Task HandleRequest(HttpListenerContext context)
         {
             // Ignorisemo favicon.ico zahteve
             if (context.Request.Url!.AbsolutePath == "/favicon.ico")
@@ -79,42 +81,47 @@ namespace TMDBMovieSearch.Server
 
             string? query = context.Request.QueryString["query"]; //citamo query parametar
             var extraParams = new Dictionary<string, string>(); //moguci filteri
-            foreach(string? key in context.Request.QueryString.AllKeys)
+            foreach (string? key in context.Request.QueryString.AllKeys)
             {
                 if (key != null && key != "query")
                 {
                     extraParams[key] = context.Request.QueryString[key]!;
                 }
             }
-            
+
             if (string.IsNullOrEmpty(query))
             {
-                SendResponse(context, 400, "Nedostaje query parametar. Primer: /search?query=Project+Hail+Mary");
+                await SendResponseAsync(context, 400, "Nedostaje query parametar. Primer: /search?query=Project+Hail+Mary");
                 return;
             }
 
+            await _requestThrottle.WaitAsync();
             try
             {
-                JObject result = _tmdbService.Search(query, extraParams);
+                JObject result = await _tmdbService.SearchAsync(query, extraParams);
                 JArray movies = (JArray)result["results"]!;
                 //_tmdbService.PrintCacheStats();
                 if (movies.Count == 0)
                 {
-                    SendResponse(context, 404, "Nisu pronadjeni filmovi za dati upit");
+                    await SendResponseAsync(context, 404, "Nisu pronadjeni filmovi za dati upit");
                 }
                 else
                 {
-                    SendResponse(context, 200, result.ToString());
+                    await SendResponseAsync(context, 200, result.ToString());
                 }
-                
+
             }
-            catch(Exception e)
+            catch (Exception e)
             {
-                SendResponse(context, 500, $"Error while calling TMDB API: {e.Message}");
+                await SendResponseAsync(context, 500, $"Error while calling TMDB API: {e.Message}");
+            }
+            finally
+            {
+                _requestThrottle.Release();
             }
         }
 
-        private void SendResponse(HttpListenerContext context, int statusCode, string message)
+        private async Task SendResponseAsync(HttpListenerContext context, int statusCode, string message)
         {
             byte[] buffer = Encoding.UTF8.GetBytes(message); //HTTP salje bytes
 
@@ -122,8 +129,7 @@ namespace TMDBMovieSearch.Server
             context.Response.ContentType = "application/json; charset=utf-8";
             context.Response.ContentLength64 = buffer.Length;
 
-            context.Response.OutputStream.Write(buffer, 0, buffer.Length);
-
+            await context.Response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
             context.Response.OutputStream.Close();
         }
     }
