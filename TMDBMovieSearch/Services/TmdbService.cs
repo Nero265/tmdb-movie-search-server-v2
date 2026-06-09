@@ -1,5 +1,6 @@
 ﻿using Newtonsoft.Json.Linq;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -15,18 +16,22 @@ namespace TMDBMovieSearch.Services
         private readonly string _apiKey;
         private readonly HttpClient _client;
 
-        private readonly Dictionary<string, CacheEntry> _cache = new();
-
-        private readonly object _cacheLock = new object();
+        private readonly ConcurrentDictionary<string, CacheEntry> _cache = new();
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _keyLocks = new();
         private readonly TimeSpan _cacheTtl = TimeSpan.FromMinutes(1);
 
-        private static readonly object _consoleLock = new object();
+        private static readonly SemaphoreSlim _consoleLock = new SemaphoreSlim(1, 1);
 
-        private void SafeWriteLine(string message)
+        private async Task LogAsync(string message)
         {
-            lock(_consoleLock)
+            await _consoleLock.WaitAsync();
+            try
             {
                 Console.WriteLine(message);
+            }
+            finally
+            {
+                _consoleLock.Release();
             }
         }
 
@@ -37,67 +42,75 @@ namespace TMDBMovieSearch.Services
             _client = client;
         }
 
-        public JObject Search(string query, Dictionary<string, string>? extraParams = null)
+        public async Task<JObject> SearchAsync(string query, Dictionary<string, string>? extraParams = null)
         {
             string cacheKey = GenerateCacheKey(query, extraParams);
             Stopwatch stopwatch = Stopwatch.StartNew();
 
-            if (_cache.TryGetValue(cacheKey, out CacheEntry? entry ) && !entry.IsExpired)
+            if (_cache.TryGetValue(cacheKey, out CacheEntry? entry) && !entry.IsExpired)
             {
                 stopwatch.Stop();
-                SafeWriteLine($"[CACHE HIT] '{query}' -> {stopwatch.Elapsed}s");
+                await LogAsync($"[CACHE HIT] '{query}' -> {stopwatch.Elapsed}s");
                 return entry.Value;
             }
 
+            SemaphoreSlim keyLock = _keyLocks.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
+            await keyLock.WaitAsync();
+
             //nije u kesu
-            lock(_cacheLock)
+            try
             {
-                if (_cache.TryGetValue(cacheKey, out CacheEntry? entryInner))
+                //drugi task ?
+                if (_cache.TryGetValue(cacheKey, out CacheEntry? entryAfterLock))
                 {
-                    if (entryInner.IsExpired)
+                    if (!entryAfterLock.IsExpired)
                     {
-                        _cache.Remove(cacheKey);
-                        SafeWriteLine($"[CACHE EXPIRED] '{query}' -> uklonjen iz kesa");
-                        PrintCacheStatsInternal();
+                        stopwatch.Stop();
+                        await LogAsync($"[CACHE HIT] '{query}' -> {stopwatch.Elapsed}");
+                        return entryAfterLock.Value;
                     }
 
                     else
                     {
-                        stopwatch.Stop();
-                        SafeWriteLine($"[CACHE HIT] '{query}' -> {stopwatch.Elapsed}s ");
-                        return entryInner.Value;
+                        _cache.TryRemove(cacheKey, out _);
+                        await LogAsync($"[CACHE EXPIRED] '{query}' -> uklonjen iz kesa");
+
                     }
                 }
 
                 //sigurno nema
-                SafeWriteLine($"[CACHE MISS] '{query}' -> pozivam TMDB API...");
+                await LogAsync($"[CACHE MISS] '{query}' -> pozivam TMDB API...");
 
-                try
-                {
-                    JObject result = CallApi(query, extraParams);
-                    //ne kesiramo ako nema rezultata
-                    JArray? movies = result["results"] as JArray;
-                    if (movies != null && movies.Count > 0)
+                return await CallApiAsync(query, extraParams)
+                    .ContinueWith(async apiTask =>
                     {
-                        _cache[cacheKey] = new CacheEntry(result, _cacheTtl);
-                        stopwatch.Stop();
-                       SafeWriteLine($"[CACHED] '{query}' -> {stopwatch.Elapsed}s");
-                        PrintCacheStatsInternal();
-                    }
-                    else
-                    {
-                        stopwatch.Stop();
-                        SafeWriteLine($"[NOT CACHED] '{query}' -> nema rezultata");
-                    }
+                        JObject result = await apiTask;
+                        JArray? movies = result["results"] as JArray;
+                        if (movies != null && movies.Count > 0)
+                        {
+                            _cache[cacheKey] = new CacheEntry(result, _cacheTtl);
+                            stopwatch.Stop();
+                            await LogAsync($"[CACHED] '{query}' -> {stopwatch.Elapsed}s");
+                            await PrintCacheStatsAsync();
+                        }
+                        else
+                        {
+                            stopwatch.Stop();
+                            await LogAsync($"[NOT CACHED] '{query}' -> nema rezultata");
+                        }
 
-                    return result;
-                }
-                catch(Exception e)
-                {
-                    stopwatch.Stop();
-                    SafeWriteLine($"[ERROR]\t\t'{query}' -> {e.Message}");
-                    throw;
-                }
+                        return result;
+                    }).Unwrap();
+            }
+            catch (Exception e)
+            {
+                stopwatch.Stop();
+                await LogAsync($"[ERROR] '{query}' -> {e.Message}");
+                throw;
+            }
+            finally
+            {
+                keyLock.Release();
             }
         }
 
@@ -120,7 +133,7 @@ namespace TMDBMovieSearch.Services
             return string.Join("&", sorted.Select(p => $"{p.Key}={p.Value}"));
         }
 
-        private JObject CallApi(string query, Dictionary<string, string>? extraParams = null)
+        private async Task<JObject> CallApiAsync(string query, Dictionary<string, string>? extraParams = null)
         {
             string url = $"{_baseUrl}?query={Uri.EscapeDataString(query)}&api_key={_apiKey}";
 
@@ -128,14 +141,14 @@ namespace TMDBMovieSearch.Services
                 foreach (var kvp in extraParams)
                     url += $"&{kvp.Key}={Uri.EscapeDataString(kvp.Value)}";
 
-            HttpResponseMessage response = _client.GetAsync(url).Result;
+            HttpResponseMessage response = await _client.GetAsync(url);
             response.EnsureSuccessStatusCode();
 
-            string body = response.Content.ReadAsStringAsync().Result;
+            string body = await response.Content.ReadAsStringAsync();
             return JObject.Parse(body);
         }
 
-        private void PrintCacheStatsInternal()
+        private async Task PrintCacheStatsAsync()
         {
             var expiredKeys = _cache
                         .Where(p => p.Value.IsExpired)
@@ -143,7 +156,7 @@ namespace TMDBMovieSearch.Services
                         .ToList();
 
             foreach (var key in expiredKeys)
-                _cache.Remove(key);
+                _cache.TryRemove(key, out _);
 
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("\n======== Cache stanje ========");
@@ -161,47 +174,7 @@ namespace TMDBMovieSearch.Services
 
             sb.AppendLine("==============================\n");
 
-            lock (_consoleLock)
-            {
-                Console.Write(sb.ToString());
-            }
+            await LogAsync(sb.ToString());
         }
-
-        public void PrintCacheStats()
-        {
-            lock(_cacheLock)
-            {
-
-                var expiredKeys = _cache
-                        .Where(p => p.Value.IsExpired)
-                        .Select(p => p.Key)
-                        .ToList();
-
-                foreach (var key in expiredKeys)
-                    _cache.Remove(key);
-
-                StringBuilder sb = new StringBuilder();
-                sb.AppendLine("\n======== Cache stanje ========");
-                sb.AppendLine($"\t Unosa u kesu: {_cache.Count}");
-                sb.AppendLine($"\t TTL: {_cacheTtl.TotalMinutes} minuta");
-                sb.AppendLine("\t Unosi:");
-
-                foreach (var p in _cache)
-                {
-                    string status = p.Value.IsExpired ?
-                        "ISTEKAO" : $"istice za {(p.Value.ExpiresAt - DateTime.UtcNow).TotalSeconds:F0}s";
-
-                    sb.AppendLine($"\t\t [{status}] '{p.Key}'");
-                }
-
-                sb.AppendLine("==============================\n");
-
-                lock(_consoleLock)
-                {
-                    Console.Write(sb.ToString());
-                }
-            }
-        }
-
     }
 }
