@@ -52,6 +52,8 @@ Server will start on http://localhost:5000
 - Request throttling (max 10 concurrent requests)
 - Thread-safe async logging
 - `ContinueWith` continuations for result processing
+- Cache size limit (max 10 entries, FIFO eviction)
+- Background cleanup task (removes expired entries every 30s)
 
 ## Stress Testing
 
