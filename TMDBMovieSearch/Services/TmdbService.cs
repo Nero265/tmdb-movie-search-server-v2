@@ -22,6 +22,9 @@ namespace TMDBMovieSearch.Services
 
         private static readonly SemaphoreSlim _consoleLock = new SemaphoreSlim(1, 1);
 
+        private const int MaxCacheSize = 10;
+        private readonly ConcurrentQueue<string> _cacheOrder = new();
+
         private async Task LogAsync(string message)
         {
             await _consoleLock.WaitAsync();
@@ -40,6 +43,7 @@ namespace TMDBMovieSearch.Services
             _baseUrl = baseUrl;
             _apiKey = apiKey;
             _client = client;
+            _ = StartCacheCleanupAsync();
         }
 
         public async Task<JObject> SearchAsync(string query, Dictionary<string, string>? extraParams = null)
@@ -89,6 +93,14 @@ namespace TMDBMovieSearch.Services
                         if (movies != null && movies.Count > 0)
                         {
                             _cache[cacheKey] = new CacheEntry(result, _cacheTtl);
+                            _cacheOrder.Enqueue(cacheKey);
+
+                            while (_cache.Count > MaxCacheSize && _cacheOrder.TryDequeue(out string? oldestKey))
+                            {
+                                _cache.TryRemove(oldestKey, out _);
+                                await LogAsync($"[CACHE EVICTED] '{oldestKey}' -> memorijsko ogranicenje");
+                            }
+
                             stopwatch.Stop();
                             await LogAsync($"[CACHED] '{query}' -> {stopwatch.Elapsed}s");
                             await PrintCacheStatsAsync();
@@ -148,16 +160,27 @@ namespace TMDBMovieSearch.Services
             return JObject.Parse(body);
         }
 
-        private async Task PrintCacheStatsAsync()
+        private async Task StartCacheCleanupAsync()
         {
-            var expiredKeys = _cache
+            while (true)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10));
+
+                var expiredKeys = _cache
                         .Where(p => p.Value.IsExpired)
                         .Select(p => p.Key)
                         .ToList();
 
-            foreach (var key in expiredKeys)
-                _cache.TryRemove(key, out _);
+                foreach (var key in expiredKeys)
+                    _cache.TryRemove(key, out _);
 
+                if (expiredKeys.Count > 0)
+                    await LogAsync($"[CACHE CLEANUP] Uklonjeno {expiredKeys.Count} isteklih unosa");
+            }
+        }
+
+        private async Task PrintCacheStatsAsync()
+        {
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("\n======== Cache stanje ========");
             sb.AppendLine($"\t Unosa u kesu: {_cache.Count}");
