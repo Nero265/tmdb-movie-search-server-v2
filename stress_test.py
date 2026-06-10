@@ -11,7 +11,13 @@ QUERIES = [
     "Interstellar",
     "The Dark Knight",
     "Eternal Sunshine of the Spotless Mind",
-    "Avatar The Way of Water"
+    "Avatar The Way of Water",
+    "Housemaid",
+    "Primal Fear",
+    "Before Sunrise",
+    "La La Land",
+    "The Notebook",
+    "Obsession"
 ]
 
 results = {

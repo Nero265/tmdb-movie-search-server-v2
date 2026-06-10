@@ -164,7 +164,7 @@ namespace TMDBMovieSearch.Services
         {
             while (true)
             {
-                await Task.Delay(TimeSpan.FromSeconds(10));
+                await Task.Delay(TimeSpan.FromSeconds(30));
 
                 var expiredKeys = _cache
                         .Where(p => p.Value.IsExpired)
