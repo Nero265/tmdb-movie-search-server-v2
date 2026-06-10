@@ -43,7 +43,7 @@ namespace TMDBMovieSearch.Server
                     try
                     {
                         HttpListenerContext context = _listener.GetContext();
-                        _ = Task.Run(() => HandleRequest(context));
+                        _ = HandleRequestAsync(context);
                     }
                     catch (HttpListenerException) when (!_listener.IsListening)
                     {
@@ -67,7 +67,7 @@ namespace TMDBMovieSearch.Server
             Console.WriteLine("Server je zaustavljen.");
         }
 
-        private async Task HandleRequest(HttpListenerContext context)
+        private async Task HandleRequestAsync(HttpListenerContext context)
         {
             // Ignorisemo favicon.ico zahteve
             if (context.Request.Url!.AbsolutePath == "/favicon.ico")
