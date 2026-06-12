@@ -30,35 +30,24 @@ namespace TMDBMovieSearch.Server
             );
         }
 
-        public void Start()
+        public async Task StartAsync()
         {
             _listener.Start();
             Console.WriteLine($"Server slusa na {_prefix}");
 
             // petlja za osluskivanje 
-            Thread listenerThread = new Thread(() =>
+            while (_listener.IsListening)
             {
-                while (_listener.IsListening)
+                try
                 {
-                    try
-                    {
-                        HttpListenerContext context = _listener.GetContext();
-                        _ = HandleRequestAsync(context);
-                    }
-                    catch (HttpListenerException) when (!_listener.IsListening)
-                    {
-                        break;
-                    }
+                    HttpListenerContext context = await _listener.GetContextAsync();
+                    _ = HandleRequestAsync(context);
                 }
-            });
-
-            listenerThread.IsBackground = true; ;
-            listenerThread.Start();
-
-            Console.WriteLine("Press ENTER to stop the server...");
-            Console.ReadLine();
-
-            Stop();
+                catch (HttpListenerException) when (!_listener.IsListening)
+                {
+                    break;
+                }
+            }
         }
 
         public void Stop()

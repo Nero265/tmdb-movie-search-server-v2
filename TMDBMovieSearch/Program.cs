@@ -16,6 +16,19 @@ class Program
         }
 
         var server = new WebServer("http://localhost:5000/", apiKey);
-        server.Start();
+
+        var tcs = new TaskCompletionSource();
+        _ = Task.Run(() =>
+        {
+            Console.ReadLine();
+            tcs.SetResult();
+        });
+
+        _ = server.StartAsync();
+
+        Console.WriteLine("Press ENTER to stop the server...");
+        await tcs.Task;
+
+        server.Stop();
     }
 }
