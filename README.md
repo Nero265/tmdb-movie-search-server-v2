@@ -8,13 +8,16 @@ task-based processing, thread-safe caching and cache stampede prevention.
 A refactored version of the original TMDB Movie Search Server, reimplemented 
 using modern async/task-based patterns. Key improvements over v1:
 
-- `Task.Run` + `async/await` replaces `ThreadPool.QueueUserWorkItem`
+- `async/await` + `Task` replaces `ThreadPool.QueueUserWorkItem`
+- `GetContextAsync()` replaces blocking listener thread
 - `ConcurrentDictionary` replaces `Dictionary` + global lock
 - Per-key `SemaphoreSlim` for cache stampede prevention
 - `ContinueWith` continuations for post-API processing
 - Controlled concurrency via request throttling (`SemaphoreSlim`)
 - Thread-safe async logging
-- Listener thread remains a classic `Thread` (blocking `GetContext()`)
+- `async Main` with `TaskCompletionSource` for clean shutdown
+- Cache size limit (max 10 entries, FIFO eviction)
+- Background cleanup task (removes expired entries every 30s)
 
 ## Example Request
 
@@ -46,7 +49,7 @@ Server will start on http://localhost:5000
 
 ## Features
 
-- Async request handling with `Task.Run` + `async/await`
+- Async request handling with `async/await`
 - Cache stampede prevention via per-key `SemaphoreSlim`
 - TTL-based thread-safe caching with `ConcurrentDictionary`
 - Request throttling (max 10 concurrent requests)
@@ -54,6 +57,8 @@ Server will start on http://localhost:5000
 - `ContinueWith` continuations for result processing
 - Cache size limit (max 10 entries, FIFO eviction)
 - Background cleanup task (removes expired entries every 30s)
+- Async listener loop with `GetContextAsync()` (no dedicated listener thread)
+- Graceful shutdown via `TaskCompletionSource` (Press ENTER to stop)
 
 ## Stress Testing
 
